@@ -6,7 +6,7 @@ ARCH:=arm
 SUBTARGET:=meson8b
 BOARDNAME:=Amlogic S805 boards (32 bit)
 CPU_TYPE:=cortex-a5
-CPU_SUBTYPE:=neon-vfpv4
+CPU_SUBTYPE:=vfpv4
 KERNEL_PATCHVER:=6.12
 
 define Target/Description
