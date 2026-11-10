@@ -1,98 +1,98 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-#=================================================
-# 玩客云 OpenWrt 固件 -> 标准 Amlogic 线刷包 转换脚本
-# 输出：.burn.img（USB Burning Tool 可直接线刷）
-#=================================================
+echo "::group::Build eMMC Burn image"
 
-echo "===== 开始打包标准 Amlogic 线刷包 ====="
+# 依赖
+sudo apt update -y
+sudo apt install -y android-sdk-libsparse-utils xz-utils rsync gzip
 
-# 关键：确保在仓库根目录工作
-cd $GITHUB_WORKSPACE
-
-# 1. 安装依赖工具（加 -y 自动确认）
-echo "[1/7] 安装依赖工具..."
-sudo apt update
-sudo apt install -y android-sdk-libsparse-utils xz-utils
-
-# 2. 下载 AmlImg 打包工具
-echo "[2/7] 下载 AmlImg 工具..."
-ver="v0.3.2"
-curl -L -o ./AmlImg https://github.com/rmoyulong/AmlImg/releases/download/$ver/AmlImg_${ver}_linux_amd64
+# 下载工具
+ver="v0.3.1"
+curl --retry 3 -L -o ./AmlImg "https://github.com/lxiaya/AmlImg/releases/download/$ver/AmlImg_${ver}_linux_amd64"
 chmod +x ./AmlImg
 
-# 3. 下载玩客云专用 uboot（eMMC 线刷底包模板）
-echo "[3/7] 下载玩客云 uboot 模板..."
-curl -L -o ./uboot.img https://github.com/rmoyulong/u-boot-onecloud/releases/download/Onecloud_Uboot_23.12.24_18.15.09/eMMC.burn.img
-
-# 4. 解压 uboot 模板，得到 burn/ 目录
-echo "[4/7] 解压 uboot 模板..."
+curl --retry 3 -L -o ./uboot.img "https://github.com/lxiaya/u-boot-onecloud/releases/download/build-20230901-0443/eMMC.burn.img"
+rm -rf burn
 ./AmlImg unpack ./uboot.img burn/
 
-# 5. 解压 OpenWrt 固件并提取分区
-echo "[5/7] 提取 OpenWrt 固件分区..."
-gunzip openwrt/bin/targets/*/*/*.gz
+# 解压，找原始 img
+gunzip -f openwrt/bin/targets/*/*/*.gz || true
+diskimg=$(find openwrt/bin/targets -name "*.img" | head -n1)
+orig_dir=$(dirname "$diskimg")
 
-diskimg=$(ls openwrt/bin/targets/*/*/*.img)
-echo "OpenWrt 镜像: $diskimg"
-loop=$(sudo losetup --find --show --partscan $diskimg)
-echo "循环设备: $loop"
+echo "✅ 源镜像：$diskimg"
 
-# 准备 rootfs 镜像
-img_ext="openwrt.img"
-img_mnt="xd"
-rootfs_mnt="img"
+# ===== loop 挂载 =====
+loop=$(sudo losetup --find --show --partscan "$diskimg")
+for i in $(seq 1 10); do
+    [ -e "${loop}p1" ] && [ -e "${loop}p2" ] && break
+    sudo partprobe "$loop" 2>/dev/null || true
+    sleep 1
+done
 
-sudo rm -rf ${img_ext} ${img_mnt} ${rootfs_mnt}
-sudo dd if=/dev/zero of=${img_ext} bs=1M count=2000
-# 加 -F 强制格式化，避免交互提示
-sudo mkfs.ext4 -F ${img_ext}
-sudo mkdir -p ${img_mnt} ${rootfs_mnt}
-sudo mount ${img_ext} ${img_mnt}
-sudo mount ${loop}p2 ${rootfs_mnt}
+cleanup() {
+    set +e
+    sudo umount ./temp_rootfs 2>/dev/null
+    sudo umount ./temp_newroot 2>/dev/null
+    sudo losetup -d "$loop" 2>/dev/null
+    sudo rm -rf ./temp_rootfs ./temp_newroot
+    set -e
+}
+trap cleanup EXIT
 
-# 复制 rootfs 内容（关键：用 cp -a 且用 . 而不是 *，确保隐藏文件也复制）
-cd ${rootfs_mnt}
-sudo cp -a . ../${img_mnt}/
-cd ..
-sudo sync
-sudo umount ${img_mnt}
-sudo umount ${rootfs_mnt}
+mkdir -p temp_rootfs temp_newroot
+sudo mount "${loop}p2" temp_rootfs
 
-# 6. 转换为 sparse 格式并打包
-echo "[6/7] 转换 sparse 格式并打包..."
-sudo img2simg ${loop}p1 burn/boot.simg
-sudo img2simg openwrt.img burn/rootfs.simg
+# ===== 按原 p2 分区实际大小创建新镜像（彻底解决空间不足）=====
+p2_size_bytes=$(sudo lsblk -b -n -o SIZE "${loop}p2")
+p2_size_mb=$(( p2_size_bytes / 1024 / 1024 ))
+echo "📏 原 p2 分区大小：${p2_size_mb}MB，按此大小创建新镜像"
 
-# 只删除我们创建的 openwrt.img，不要用通配符
-sudo rm -f openwrt.img
-sudo losetup -d $loop
+new_rootfs_img="./openwrt_rootfs.ext4"
+# fallocate 秒级分配，比 dd 快得多
+fallocate -l "${p2_size_mb}M" "$new_rootfs_img"
+# -m 0 禁用 root 预留空间，多挤出 5%
+sudo mkfs.ext4 -q -m 0 "$new_rootfs_img"
+sudo mount "$new_rootfs_img" temp_newroot
 
-# 添加分区配置
-cat <<EOF >> burn/commands.txt
+sudo rsync -a temp_rootfs/ temp_newroot/
+sudo umount temp_newroot
+sudo umount temp_rootfs
+
+sudo img2simg "${loop}p1" burn/boot.simg
+sudo img2simg "$new_rootfs_img" burn/rootfs.simg
+
+cat > burn/commands.txt <<'EOF'
 PARTITION:boot:sparse:boot.simg
 PARTITION:rootfs:sparse:rootfs.simg
 EOF
 
-# 打包成标准线刷包
-prefix=$(ls openwrt/bin/targets/*/*/*.img | sed 's/\.img$//')
-burnimg=${prefix}.burn.img
-echo "输出线刷包: $burnimg"
-./AmlImg pack $burnimg burn/
+# ===== 打包线刷包 → OneCloud-immwrt-2512.burn.img.xz =====
+burnimg="${orig_dir}/OneCloud-immwrt-2512.burn.img"
+./AmlImg pack "$burnimg" burn/
+xz -9 --threads=0 "$burnimg"
+echo "✅ 线刷包：${burnimg}.xz"
 
-# 7. 压缩并生成校验
-echo "[7/7] 压缩并生成校验文件..."
-cd openwrt/bin/targets/*/*/
-for f in *.burn.img; do
-  sha256sum "$f" > "${f}.sha"
-  xz -9 --threads=0 --compress "$f"
-done
+echo "::endgroup::"
 
-# 删除原始 raw 镜像
-sudo rm -f *.img
-sudo rm -f *.gz
+# ===== 原始固件 → OneCloud-immwrt-2512.img.gz =====
+echo "::group::Pack original firmware"
+cp "$diskimg" "${orig_dir}/OneCloud-immwrt-2512.img"
+gzip -9 "${orig_dir}/OneCloud-immwrt-2512.img"
+echo "✅ 原始固件：${orig_dir}/OneCloud-immwrt-2512.img.gz"
+echo "::endgroup::"
 
-echo "===== 线刷包打包完成 ====="
-ls -lh
-echo "=========================="
+# ===== 严格清理：只留两个产物 =====
+sudo rm -f "$new_rootfs_img" ./AmlImg ./uboot.img
+rm -rf burn temp_rootfs temp_newroot
+
+# 删除原始编译产物（已被重命名版替代）
+rm -f "$diskimg"
+
+# 删除目录中可能残留的其他文件
+find "$orig_dir" -maxdepth 1 -name "*.img" -delete
+find "$orig_dir" -maxdepth 1 -name "*.gz" ! -name "OneCloud-immwrt-2512.img.gz" -delete
+
+echo "🎉 完成！最终产物："
+ls -lh "${orig_dir}/OneCloud-immwrt-2512".*
