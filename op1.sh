@@ -1,30 +1,8 @@
 #!/bin/bash
-#
-# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-# https://github.com/P3TERX/Actions-OpenWrt
-# File name: diy-op1.sh
-# Description: OpenWrt DIY script part 1 (Before Update feeds)
-#
+# File name: op1.sh
+set -e
 
-# 查看所有标签
-#git tag
-# 切换到标签 v25.12.5
-git checkout v25.12.5
+# golang 保持 ImmortalWrt 25.12.2 官方自带版本，不替换
 
-# 全部改为稳定的 github 源
-sed -i 's|https://git.openwrt.org/feed/packages.git|https://github.com/openwrt/packages.git|g' feeds.conf.default
-sed -i 's|https://git.openwrt.org/project/luci.git|https://github.com/openwrt/luci.git|g' feeds.conf.default
-sed -i 's|https://git.openwrt.org/feed/routing.git|https://github.com/openwrt/routing.git|g' feeds.conf.default
-sed -i 's|https://git.openwrt.org/feed/telephony.git|https://github.com/openwrt/telephony.git|g' feeds.conf.default
-
-# 添加 lienol 大的 package
-echo 'src-git lienol https://github.com/Lienol/openwrt-package.git;main' >>feeds.conf.default
-
-# Uncomment a feed source
-#sed -i 's/^#\(.*helloworld\)/\1/' feeds.conf.default
-# Add a feed source
-#echo 'src-git helloworld https://github.com/fw876/helloworld' >>feeds.conf.default
+echo "✅ op1.sh 执行完成：golang 保持原生版本"
+cat feeds.conf.default
